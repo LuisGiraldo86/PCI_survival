@@ -6,8 +6,14 @@ authors = [
     {name = "Your Name",email = "you@example.com"}
 ]
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 dependencies = [
+    "jupyter (>=1.1.1,<2.0.0)",
+    "seaborn (>=0.13.2,<0.14.0)",
+    "scipy (>=1.17.1,<2.0.0)",
+    "statsmodels (>=0.14.6,<0.15.0)",
+    "lifelines (>=0.30.3,<0.31.0)",
+    "pingouin (>=0.6.1,<0.7.0)"
 ]
 
 [tool.poetry]
