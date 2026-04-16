@@ -36,12 +36,16 @@ def paired_permutation_test(x, y, n_permutations=10000, alternative="two-sided",
     signs = rng.choice([-1, 1], size=(n_permutations, len(d)))
     perm_stats = np.mean(signs * d, axis=1)
 
+    # Include observed statistic in the reference distribution (Phipson & Smyth 2010)
+    # so that p = (count + 1) / (B + 1), preventing p = 0.
+    all_stats = np.concatenate([perm_stats, [stat_obs]])
+
     if alternative == "two-sided":
-        p_value = np.mean(np.abs(perm_stats) >= abs(stat_obs))
+        p_value = np.mean(np.abs(all_stats) >= abs(stat_obs))
     elif alternative == "greater":
-        p_value = np.mean(perm_stats >= stat_obs)
+        p_value = np.mean(all_stats >= stat_obs)
     elif alternative == "less":
-        p_value = np.mean(perm_stats <= stat_obs)
+        p_value = np.mean(all_stats <= stat_obs)
     else:
         raise ValueError("Invalid alternative")
 
@@ -85,8 +89,8 @@ def paired_permutation_test_median(x, y, n_permutations=20000,
     """
     rng = np.random.default_rng(random_state)
 
-    x = np.asarray(x)
-    y = np.asarray(y)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
     d = x - y
 
     stat_obs = np.median(d)
@@ -94,12 +98,16 @@ def paired_permutation_test_median(x, y, n_permutations=20000,
     signs = rng.choice([-1, 1], size=(n_permutations, len(d)))
     perm_stats = np.median(signs * d, axis=1)
 
+    # Include observed statistic in the reference distribution (Phipson & Smyth 2010)
+    # so that p = (count + 1) / (B + 1), preventing p = 0.
+    all_stats = np.concatenate([perm_stats, [stat_obs]])
+
     if alternative == "two-sided":
-        p_value = np.mean(np.abs(perm_stats) >= abs(stat_obs))
+        p_value = np.mean(np.abs(all_stats) >= np.abs(stat_obs))
     elif alternative == "greater":
-        p_value = np.mean(perm_stats >= stat_obs)
+        p_value = np.mean(all_stats >= stat_obs)
     elif alternative == "less":
-        p_value = np.mean(perm_stats <= stat_obs)
+        p_value = np.mean(all_stats <= stat_obs)
     else:
         raise ValueError("Invalid alternative")
 
@@ -107,32 +115,23 @@ def paired_permutation_test_median(x, y, n_permutations=20000,
 
 def paired_bootstrap_ci(x, y, statistic="median", 
                         n_bootstrap=20000, ci=0.95, random_state=None):
-    """
-    Bootstrap CI for paired differences.
-    """
     rng = np.random.default_rng(random_state)
-
-    x = np.asarray(x)
-    y = np.asarray(y)
-    d = x - y
+    d = np.asarray(x) - np.asarray(y)
     n = len(d)
 
-    stats = []
+    # Vectorized resampling
+    resamples = rng.choice(d, size=(n_bootstrap, n), replace=True)
+    
+    if statistic == "median":
+        stats = np.median(resamples, axis=1)
+    elif statistic == "mean":
+        stats = np.mean(resamples, axis=1)
+    else:
+        raise ValueError("Invalid statistic")
 
-    for _ in range(n_bootstrap):
-        idx = rng.integers(0, n, n)
-        sample = d[idx]
-
-        if statistic == "median":
-            stats.append(np.median(sample))
-        elif statistic == "mean":
-            stats.append(np.mean(sample))
-        else:
-            raise ValueError("Invalid statistic")
-
+    # Clean percentile calculation
     alpha = 1 - ci
-    lower = np.percentile(stats, 100 * alpha / 2)
-    upper = np.percentile(stats, 100 * (1 - alpha / 2))
+    lower, upper = np.percentile(stats, [100 * alpha / 2, 100 * (1 - alpha / 2)])
 
     return lower, upper
 
@@ -184,8 +183,8 @@ def paired_bootstrap_ci_bca(x, y, statistic="median",
     def adjusted_quantile(z):
         return norm.cdf(z0 + (z0 + z) / (1 - a * (z0 + z)))
 
-    q_low = adjusted_quantile(z_low)
-    q_high = adjusted_quantile(z_high)
+    q_low = np.clip(adjusted_quantile(z_low), 0, 1)
+    q_high = np.clip(adjusted_quantile(z_high), 0, 1)
 
     lower = np.quantile(boot_stats, q_low)
     upper = np.quantile(boot_stats, q_high)
