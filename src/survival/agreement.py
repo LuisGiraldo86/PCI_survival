@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.stats import binomtest, norm
+from scipy.stats import binomtest, norm, linregress
 import matplotlib.pyplot as plt
 import pandas as pd
 import pingouin as pg
@@ -297,7 +297,7 @@ def icc_bias_corrected(x, y, method="median"):
     # remove bias from x
     x_corr = x - delta
 
-    # correct long-format construction (same as yours)
+    # long-format construction
     df = pd.DataFrame({
         "subject": list(range(len(x))) * 2,
         "rater":   ["rater1"] * len(x) + ["rater2"] * len(y),
@@ -316,12 +316,14 @@ def icc_bias_corrected(x, y, method="median"):
 
     return delta, icc_a1[["Type", "ICC", "CI95", "pval"]]
 
-def bland_altman_analysis_robust(method1, method2):
-    import numpy as np
-    from scipy.stats import linregress
+def bland_altman_analysis_robust(method1, method2, plots_path=None, name1="pPCI", name2="sPCI"):
+    method1 = np.asarray(method1, dtype=float)
+    method2 = np.asarray(method2, dtype=float)
 
     mean = (method1 + method2) / 2
     diff = method1 - method2
+
+    n = len(diff)
 
     # Classical
     mean_diff = np.mean(diff)
@@ -329,21 +331,47 @@ def bland_altman_analysis_robust(method1, method2):
     loa_upper = mean_diff + 1.96 * std_diff
     loa_lower = mean_diff - 1.96 * std_diff
 
-    # Robust
+    # Robust (empirical quantiles are unstable for small n)
     median_diff = np.median(diff)
     loa_lower_q = np.percentile(diff, 2.5)
     loa_upper_q = np.percentile(diff, 97.5)
 
     # Proportional bias
-    slope, intercept, r_value, p_value, _ = linregress(mean, diff)
+    slope, intercept, r_value, slope_pvalue, _ = linregress(mean, diff)
 
     print("=== Bland-Altman Results ===")
-    print(f"Mean bias:              {mean_diff:.3f}")
-    print(f"Median bias:            {median_diff:.3f}")
-    print(f"SD of differences:      {std_diff:.3f}")
-    print(f"Classical LoA:          [{loa_lower:.3f}, {loa_upper:.3f}]")
-    print(f"Robust LoA (quantile):  [{loa_lower_q:.3f}, {loa_upper_q:.3f}]")
-    print(f"Slope (bias vs mean):   {slope:.3f} (p={p_value:.3e})")
+    print(f"  Methods:                {name1} - {name2}  (n={n})")
+    print(f"  Mean bias:              {mean_diff:.3f}")
+    print(f"  Median bias:            {median_diff:.3f}")
+    print(f"  SD of differences:      {std_diff:.3f}")
+    print(f"  Classical LoA:          [{loa_lower:.3f}, {loa_upper:.3f}]")
+    print(f"  Robust LoA (quantile):  [{loa_lower_q:.3f}, {loa_upper_q:.3f}]")
+    print(f"  Proportional bias:      slope={slope:.3f}, intercept={intercept:.3f}, r={r_value:.3f} (p={slope_pvalue:.3e})")
+
+    if plots_path is not None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.scatter(mean, diff, color="steelblue", edgecolors="white", s=70, zorder=3)
+
+        x_line = np.linspace(mean.min(), mean.max(), 200)
+        ax.plot(x_line, intercept + slope * x_line, color="darkorange", linestyle="-",
+                linewidth=1.2, label=f"Reg. line (slope={slope:.3f}, p={slope_pvalue:.3e})")
+
+        ax.axhline(float(mean_diff),   color="black",     linestyle="-",  linewidth=1.5, label=f"Mean bias: {mean_diff:.2f}")
+        ax.axhline(float(loa_upper),   color="crimson",   linestyle="--", linewidth=1.2, label=f"\u00b11.96 SD: [{loa_lower:.2f}, {loa_upper:.2f}]")
+        ax.axhline(float(loa_lower),   color="crimson",   linestyle="--", linewidth=1.2, label="_nolegend_")
+        ax.axhline(float(loa_upper_q), color="steelblue", linestyle=":",  linewidth=1.2, label=f"2.5/97.5th pct: [{loa_lower_q:.2f}, {loa_upper_q:.2f}]")
+        ax.axhline(float(loa_lower_q), color="steelblue", linestyle=":",  linewidth=1.2, label="_nolegend_")
+        ax.axhline(0,           color="gray",      linestyle=":",  linewidth=1.0, label="Zero line")
+
+        ax.fill_between(ax.get_xlim(), float(loa_lower), float(loa_upper), alpha=0.05, color="crimson")
+
+        ax.set_xlabel(f"Mean of {name1} and {name2}", fontsize=12)
+        ax.set_ylabel(f"Difference ({name1} \u2212 {name2})", fontsize=12)
+        ax.set_title("Bland-Altman Plot (Robust)", fontsize=14)
+        ax.legend(fontsize=9)
+        plt.tight_layout()
+        plt.savefig(f"{plots_path}/bland_altman_robust.png", dpi=600)
+        plt.close(fig)
 
     return {
         "mean_bias": mean_diff,
@@ -351,5 +379,7 @@ def bland_altman_analysis_robust(method1, method2):
         "loa_classical": (loa_lower, loa_upper),
         "loa_robust": (loa_lower_q, loa_upper_q),
         "slope": slope,
-        "p_value": p_value
+        "intercept": intercept,
+        "r_value": r_value,
+        "slope_pvalue": slope_pvalue,
     }
