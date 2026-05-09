@@ -191,7 +191,7 @@ def paired_bootstrap_ci_bca(x, y, statistic="median",
 
     return lower, upper
 
-def bland_altman_analysis(method1, method2, plots_path, name1="pPCI", name2="sPCI"):
+def bland_altman_analysis(method1, method2, plots_path, name1="sPCI", name2="pPCI"):
     mean     = (method1 + method2) / 2
     diff     = method1 - method2
     mean_diff = np.mean(diff)
@@ -239,7 +239,7 @@ def bland_altman_analysis(method1, method2, plots_path, name1="pPCI", name2="sPC
     ax.legend(fontsize=10)
     ax.set_aspect("equal")
     plt.tight_layout()
-    plt.savefig(f"{plots_path}/scatter_identity.png", dpi=150)
+    plt.savefig(f"{plots_path}/scatter_identity.png", dpi=600)
 
 
     return mean_diff, std_diff, loa_lower, loa_upper
@@ -315,7 +315,7 @@ def icc_bias_corrected(x, y, method="median"):
 
     return delta, icc_a1[["Type", "ICC", "CI95", "pval"]]
 
-def bland_altman_analysis_robust(method1, method2, plots_path=None, name1="pPCI", name2="sPCI"):
+def bland_altman_analysis_robust(method1, method2, plots_path=None, name1="sPCI", name2="pPCI"):
     method1 = np.asarray(method1, dtype=float)
     method2 = np.asarray(method2, dtype=float)
 
@@ -381,4 +381,88 @@ def bland_altman_analysis_robust(method1, method2, plots_path=None, name1="pPCI"
         "intercept": intercept,
         "r_value": r_value,
         "slope_pvalue": slope_pvalue,
+    }
+
+def bland_altman_regression_loa(method1, method2, plots_path=None, name1="sPCI", name2="pPCI"):
+    """
+    Bland-Altman with regression-based LoA (Bland & Altman, 1999).
+
+    When proportional bias exists (diff correlates with mean), fixed LoA are
+    misleading. This fits d ~ mean for the bias and |residuals| ~ mean for the
+    SD, producing limits that vary with measurement magnitude.
+    """
+    method1 = np.asarray(method1, dtype=float)
+    method2 = np.asarray(method2, dtype=float)
+
+    mean_vals = (method1 + method2) / 2
+    diff = method1 - method2
+    n = len(diff)
+
+    # Bias model: diff ~ mean
+    slope_b, intercept_b, r_b, p_b, _ = linregress(mean_vals, diff)
+    fitted_bias = intercept_b + slope_b * mean_vals
+    residuals = diff - fitted_bias
+
+    # Heteroscedasticity: |residuals| ~ mean
+    # For normal residuals E[|e|] = sigma * sqrt(2/pi), so sigma = E[|e|] * sqrt(pi/2)
+    abs_res = np.abs(residuals)
+    slope_s, intercept_s, r_s, p_s, _ = linregress(mean_vals, abs_res)
+    heteroscedastic = p_s < 0.05
+
+    x_range = np.linspace(mean_vals.min(), mean_vals.max(), 300)
+    bias_line = intercept_b + slope_b * x_range
+
+    if heteroscedastic:
+        sd_line = np.maximum(intercept_s + slope_s * x_range, 1e-6) * np.sqrt(np.pi / 2)
+    else:
+        sd_line = np.full(300, np.std(residuals, ddof=2))
+
+    loa_upper_line = bias_line + 1.96 * sd_line
+    loa_lower_line = bias_line - 1.96 * sd_line
+
+    print("=== Bland-Altman: Regression-Based LoA ===")
+    print(f"  n = {n}")
+    print(f"  Bias:              d = {intercept_b:.3f} + {slope_b:.3f}·mean  (r={r_b:.3f}, p={p_b:.3e})")
+    print(f"  Heteroscedastic:   {'Yes' if heteroscedastic else 'No'}  (|residuals| ~ mean: slope={slope_s:.4f}, p={p_s:.3e})")
+    print()
+    print(f"  {'mean':>6}  {'bias':>7}  {'LoA lower':>10}  {'LoA upper':>10}")
+    for m in [5, 10, 15, 20, 25]:
+        bias_m = intercept_b + slope_b * m
+        if heteroscedastic:
+            sd_m = max(intercept_s + slope_s * m, 1e-6) * np.sqrt(np.pi / 2)
+        else:
+            sd_m = np.std(residuals, ddof=2)
+        print(f"  {m:>6}  {bias_m:>7.2f}  {bias_m - 1.96*sd_m:>10.2f}  {bias_m + 1.96*sd_m:>10.2f}")
+
+    if plots_path is not None:
+        sd_label = "heteroscedastic" if heteroscedastic else "homoscedastic"
+
+        fig, ax = plt.subplots(figsize=(8, 5))
+        ax.scatter(mean_vals, diff, color="steelblue", edgecolors="white", s=70, zorder=3, alpha=0.7)
+        ax.plot(x_range, bias_line, color="black", linewidth=1.5,
+                label=f"Bias: {intercept_b:.2f} + {slope_b:.3f}·mean")
+        ax.plot(x_range, loa_upper_line, color="crimson", linestyle="--", linewidth=1.2,
+                label="Regression LoA (±1.96 SD)")
+        ax.plot(x_range, loa_lower_line, color="crimson", linestyle="--", linewidth=1.2,
+                label="_nolegend_")
+        ax.fill_between(x_range, loa_lower_line, loa_upper_line, alpha=0.07, color="crimson")
+        ax.axhline(0, color="gray", linestyle=":", linewidth=1.0, label="Zero line")
+
+        ax.set_xlabel(f"Mean of {name1} and {name2}", fontsize=12)
+        ax.set_ylabel(f"Difference ({name1} − {name2})", fontsize=12)
+        ax.set_title(f"Bland-Altman Plot – Regression LoA ({sd_label} SD)", fontsize=13)
+        ax.legend(fontsize=10)
+        plt.tight_layout()
+        plt.savefig(f"{plots_path}/bland_altman_regression_loa.png", dpi=600)
+        plt.close(fig)
+
+    return {
+        "slope_bias": slope_b,
+        "intercept_bias": intercept_b,
+        "r_bias": r_b,
+        "p_bias": p_b,
+        "heteroscedastic": heteroscedastic,
+        "slope_sd": slope_s,
+        "intercept_sd": intercept_s,
+        "p_sd": p_s,
     }
