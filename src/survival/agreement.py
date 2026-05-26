@@ -1,8 +1,11 @@
 import numpy as np
 from scipy.stats import binomtest, norm, linregress
+from scipy import stats
 import matplotlib.pyplot as plt
 import pandas as pd
 import pingouin as pg
+import statsmodels.formula.api as smf
+from statsmodels.stats.anova import anova_lm
 
 def paired_permutation_test(x, y, n_permutations=10000, alternative="two-sided", random_state=None):
     """
@@ -465,4 +468,180 @@ def bland_altman_regression_loa(method1, method2, plots_path=None, name1="sPCI",
         "slope_sd": slope_s,
         "intercept_sd": intercept_s,
         "p_sd": p_s,
+    }
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Level-2 Bland-Altman group analysis
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ba_stats(diff: np.ndarray, alpha: float = 0.05) -> dict:
+    """Bland-Altman statistics for a single array of differences, with CIs."""
+    n         = len(diff)
+    mean_diff = np.mean(diff)
+    std_diff  = np.std(diff, ddof=1)
+    se_mean   = std_diff / np.sqrt(n)
+    se_loa    = std_diff * np.sqrt(3 / n)
+    t_crit    = stats.t.ppf(1 - alpha / 2, df=n - 1)
+    z_loa     = 1.96
+
+    loa_upper = mean_diff + z_loa * std_diff
+    loa_lower = mean_diff - z_loa * std_diff
+
+    return {
+        "n"               : n,
+        "bias"            : mean_diff,
+        "sd"              : std_diff,
+        "loa_upper"       : loa_upper,
+        "loa_lower"       : loa_lower,
+        "ci_bias_lower"   : mean_diff - t_crit * se_mean,
+        "ci_bias_upper"   : mean_diff + t_crit * se_mean,
+        "ci_loa_upper_lo" : loa_upper - t_crit * se_loa,
+        "ci_loa_upper_hi" : loa_upper + t_crit * se_loa,
+        "ci_loa_lower_lo" : loa_lower - t_crit * se_loa,
+        "ci_loa_lower_hi" : loa_lower + t_crit * se_loa,
+    }
+
+
+def test_bias_by_group(df: pd.DataFrame, diff_col: str, group_col: str) -> dict:
+    """
+    Test whether systematic bias differs across groups.
+
+    Fits: d_i = mu + beta_g * G_i + epsilon_i  (OLS, Type-II ANOVA).
+    A significant beta_g means bias depends on group membership.
+    """
+    data = df[[diff_col, group_col]].copy()
+    data[group_col] = data[group_col].astype("category")
+
+    formula   = f"{diff_col} ~ C({group_col})"
+    model     = smf.ols(formula, data=data).fit()
+    anova_tbl = anova_lm(model, typ=2)
+    overall_p = anova_tbl.loc[f"C({group_col})", "PR(>F)"]
+
+    group_means = []
+    for g in data[group_col].cat.categories:
+        subset = data.loc[data[group_col] == g, diff_col]
+        ba = _ba_stats(subset.values)
+        group_means.append({
+            "group"         : g,
+            "n"             : ba["n"],
+            "bias"          : ba["bias"],
+            "ci_bias_lower" : ba["ci_bias_lower"],
+            "ci_bias_upper" : ba["ci_bias_upper"],
+        })
+
+    return {
+        "model"       : model,
+        "anova_table" : anova_tbl,
+        "group_means" : pd.DataFrame(group_means).set_index("group"),
+        "overall_pval": overall_p,
+    }
+
+
+def test_variance_by_group(df: pd.DataFrame, diff_col: str, group_col: str) -> dict:
+    """
+    Test whether the spread of differences is homogeneous across groups.
+
+    Levene's test (robust to non-normality) and Bartlett's test (optimal
+    under normality).
+    """
+    groups     = df[group_col].unique()
+    group_data = [df.loc[df[group_col] == g, diff_col].values.astype(float)
+                  for g in groups]
+
+    lev_stat, lev_p = stats.levene(*group_data, center="median")
+    try:
+        bar_stat, bar_p = stats.bartlett(*group_data)
+    except ValueError:
+        bar_stat, bar_p = float("nan"), float("nan")
+
+    group_sd = pd.DataFrame({
+        "group": groups,
+        "n"    : [len(g) for g in group_data],
+        "sd"   : [np.std(g, ddof=1) for g in group_data],
+        "var"  : [np.var(g, ddof=1) for g in group_data],
+    }).set_index("group")
+
+    return {
+        "levene"  : {"statistic": lev_stat,  "p_value": lev_p},
+        "bartlett": {"statistic": bar_stat, "p_value": bar_p},
+        "group_sd": group_sd,
+    }
+
+
+def group_loa(
+    df: pd.DataFrame,
+    diff_col: str,
+    group_col: str,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """Compute full Bland-Altman statistics (bias, SD, LoA + CIs) per group."""
+    records = []
+    for g, sub in df.groupby(group_col):
+        ba = _ba_stats(sub[diff_col].values, alpha=alpha)
+        ba["group"] = g
+        records.append(ba)
+
+    cols = [
+        "group", "n", "bias",
+        "ci_bias_lower", "ci_bias_upper",
+        "sd",
+        "loa_upper", "ci_loa_upper_lo", "ci_loa_upper_hi",
+        "loa_lower", "ci_loa_lower_lo", "ci_loa_lower_hi",
+    ]
+    return pd.DataFrame(records)[cols].set_index("group")
+
+
+def bland_altman_group_analysis(
+    df: pd.DataFrame,
+    method1_col: str,
+    method2_col: str,
+    group_col: str,
+    alpha: float = 0.05,
+) -> dict:
+    """
+    Level-2 Bland-Altman group analysis (Bland & Altman 1999).
+
+    2a. Linear model test: does bias differ across groups?
+    2b. Levene + Bartlett tests: does variance differ across groups?
+    Plus group-specific LoA with confidence intervals.
+    """
+    data          = df.copy()
+    data["_diff"] = data[method1_col] - data[method2_col]
+    data["_mean"] = (data[method1_col] + data[method2_col]) / 2
+
+    bias_res = test_bias_by_group(data, "_diff", group_col)
+    var_res  = test_variance_by_group(data, "_diff", group_col)
+    loa_tbl  = group_loa(data, "_diff", group_col, alpha=alpha)
+
+    sep = "─" * 60
+    print(sep)
+    print(f"BLAND-ALTMAN GROUP ANALYSIS  [{group_col}]")
+    print(sep)
+
+    print("\n[2a] BIAS DIFFERENCES ACROSS GROUPS")
+    print(f"     d ~ C({group_col}),  overall p = {bias_res['overall_pval']:.4f}", end="  ")
+    print("*** significant" if bias_res["overall_pval"] < alpha else "(not significant)")
+    print("\n     Group-level bias (95 % CI):")
+    print(bias_res["group_means"].round(3).to_string())
+
+    lev = var_res["levene"]
+    bar = var_res["bartlett"]
+    print(f"\n[2b] VARIANCE DIFFERENCES ACROSS GROUPS")
+    print(f"     Levene   W = {lev['statistic']:.4f},  p = {lev['p_value']:.4f}", end="  ")
+    print("*** significant" if lev["p_value"] < alpha else "(not significant)")
+    print(f"     Bartlett K = {bar['statistic']:.4f},  p = {bar['p_value']:.4f}", end="  ")
+    print("*** significant" if bar["p_value"] < alpha else "(not significant)")
+    print("\n     Group-level SD:")
+    print(var_res["group_sd"].round(3).to_string())
+
+    print(f"\nGROUP-SPECIFIC LoA  (alpha = {alpha})")
+    print(loa_tbl.round(2).to_string())
+    print(sep)
+
+    return {
+        "data"         : data,
+        "bias_test"    : bias_res,
+        "variance_test": var_res,
+        "loa_table"    : loa_tbl,
     }
